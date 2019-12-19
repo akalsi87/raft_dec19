@@ -23,8 +23,8 @@ class RaftLog:
         return self.entries[n]
     
     def __repr__(self):
-        return f'RaftLog<{self.entries}>'
-        
+        return f'RaftLog<{len(self.entries)} entries, last={self.entries[-1:]}>'
+
     def append_entries(self, prev_index, prev_term, entries):
         # prev_index is the index of the log item immediately preceding the new entries.
         # prev_term is the expected term of the log item immediately preceding new entries.

@@ -17,11 +17,15 @@ for c in control:
     c.start()
 
 # Example of replication
-control[0].machine.become_leader()
-control[0].client_add_entry("spam")
+# control[0].machine.become_leader()
+# control[0].client_add_entry("spam")
 
-import time
-time.sleep(2)
-for c in control:
-    print(c.machine.log)
+# import time
+# time.sleep(2)
+# for c in control:
+#     print(c.machine.log)
+
+def show_logs():
+    for n, c in enumerate(control):
+        print(f'{n}:{c.machine.state:<10s}:{c.machine.log}')
 

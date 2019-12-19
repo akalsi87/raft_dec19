@@ -22,6 +22,19 @@ class AppendEntriesResponse(NamedTuple):
     success: bool
     match_index: int
 
+class RequestVote(NamedTuple):
+    source: int
+    dest: int
+    term: int
+    last_log_index: int
+    last_log_term: int
+
+class RequestVoteResponse(NamedTuple):
+    source: int
+    dest: int
+    term: int
+    vote_granted: bool
+
 class RaftMachine:
     def __init__(self, control):
         self.state = None
@@ -53,9 +66,28 @@ class RaftMachine:
 
     def become_follower(self):
         self.state = "FOLLOWER"
+        print(self.control.address, "became follower")
 
     def become_candidate(self):
         self.state = "CANDIDATE"
+        self.current_term += 1
+        self.voted_for = self.control.address
+        self.votes_granted = 0    # How many votes for myself
+        last_log_index = len(self.log) - 1
+        last_log_term = self.log[-1].term if self.log else -1 
+        
+        # Send a requestvote to all peers
+        for n in self.control.peers:
+            self.control.send_message(
+                RequestVote(
+                    self.control.address,
+                    n,
+                    self.current_term,
+                    last_log_index,
+                    last_log_term
+                )
+            )
+        print(self.control.address, "became candidate")
 
     def become_leader(self):
         self.state = "LEADER"
@@ -67,6 +99,7 @@ class RaftMachine:
 
         # Upon becoming leader, immediately send empty AppendEntries
         self.send_append_entries()
+        print(self.control.address, "became leader")
 
     def handle_message(self, msg):
         # Received any kind of message
@@ -78,18 +111,26 @@ class RaftMachine:
         # If we ever get a message with a term higher than us, we immediately become a follower no matter what
         if msg.term > self.current_term:
             self.current_term = msg.term
+            self.voted_for = None
             self.become_follower()
         
         if isinstance(msg, AppendEntries):
             self.handle_AppendEntries(msg)
         elif isinstance(msg, AppendEntriesResponse):
             self.handle_AppendEntriesResponse(msg)
+        elif isinstance(msg, RequestVote):
+            self.handle_RequestVote(msg)
+        elif isinstance(msg, RequestVoteResponse):
+            self.handle_RequestVoteResponse(msg)
         else:
             raise RuntimeError(f"Bad Message {msg}")
 
     def handle_election_timeout(self):
         # Call an election
-        print("election_timeout")
+        if self.state == 'LEADER':
+            return 
+            
+        self.become_candidate()
 
     def send_append_entries_one(self, n):
         prev_log_index = self.next_index[n] - 1
@@ -120,6 +161,8 @@ class RaftMachine:
 
     def handle_AppendEntries(self, msg):
         assert self.state != 'LEADER'
+        self.control.reset_election_timeout()
+
         if self.state == 'CANDIDATE':
             self.become_follower()
         
@@ -156,6 +199,37 @@ class RaftMachine:
             self.next_index[msg.source] -= 1
             self.send_append_entries_one(msg.source)
 
+    def handle_RequestVote(self, msg):
+        success = ((self.voted_for is None)                        # Can't have previously voted
+                   and (msg.last_log_index >= len(self.log) - 1)   # Candidate must have at least as many log entries as me
+                   and (not self.log                               # My log could be empty (grant vote)
+                          or (msg.last_log_term > self.log[msg.last_log_index].term)   # Message has greater term in last index
+                          or (msg.last_log_term == self.log[msg.last_log_index].term   # Message has greater log length in same term
+                               and msg.last_log_index >= len(self.log) - 1)
+                   )
+        )
+        if success:
+            self.voted_for = msg.source
+
+        self.control.send_message(
+            RequestVoteResponse(
+                msg.dest,
+                msg.source,
+                self.current_term,
+                success
+            )
+        )
+
+    
+    def handle_RequestVoteResponse(self, msg):
+        if self.state != "CANDIDATE":
+            return
+
+        if msg.vote_granted:
+            self.votes_granted += 1
+            if self.votes_granted >= (len(self.control.peers)//2):
+                self.become_leader()
+        
 # -----------------------  TESTING 
 
 class MockController:
