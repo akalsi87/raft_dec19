@@ -27,7 +27,7 @@ class RaftMachine:
         self.state = None
         self.control = control
 
-        # Persistent state 
+        # Persistent state.  ?????? Persistence where? who?
         self.current_term = 0
         self.voted_for = None
         self.log = RaftLog()
@@ -87,7 +87,7 @@ class RaftMachine:
         else:
             raise RuntimeError(f"Bad Message {msg}")
 
-    def handle_election_timeout(self, msg):
+    def handle_election_timeout(self):
         # Call an election
         print("election_timeout")
 
@@ -133,7 +133,10 @@ class RaftMachine:
                 msg.prev_log_index + len(msg.entries) if success else -1
                 )
         )
-
+        if success and msg.leader_commit > self.commit_index:
+            self.commit_index = min(msg.leader_commit, len(self.log) -1)
+            # Must apply to client state machine (possibly)
+            
     def handle_AppendEntriesResponse(self, msg):
         if self.state != 'LEADER':
             return
@@ -141,7 +144,128 @@ class RaftMachine:
             # It worked!
             self.match_index[msg.source] = msg.match_index
             self.next_index[msg.source] = msg.match_index + 1
+
+            # Check for consensus here
+            committed = sorted(self.match_index.values())[len(self.match_index)//2]   # The "median"
+            if committed > self.commit_index and self.log[committed].term == self.current_term:
+                self.commit_index = committed
+            # Might need to apply state machine
+
         else:
             # It failed! Must retry by backing the log index down by one
             self.next_index[msg.source] -= 1
             self.send_append_entries_one(msg.source)
+
+# -----------------------  TESTING 
+
+class MockController:
+    def __init__(self, address, peers):
+        self.address = address
+        self.peers = peers
+        self.messages = []
+        self.machine = RaftMachine(self)
+
+    def clear(self):
+        self.messages = []
+
+    def send_message(self, msg):
+        self.messages.append(msg)
+
+def test_machine():
+    c = MockController(0, [1,2,3,4])
+
+    # All machines should start in the follower state
+    assert c.machine.state == 'FOLLOWER'
+
+    # Some basic operational features
+
+    # If any message is received with a higher term, the machine reverts to
+    # to follower state and updates its current term to the new term
+    c.machine.state == 'LEADER'
+    c.machine.handle_message(
+        AppendEntriesResponse(
+            0,
+            1,
+            2,
+            True,
+            0
+        )
+    )
+    assert c.machine.state == 'FOLLOWER'
+    assert c.machine.current_term == 2
+
+    # Upon promotion to candidate, empty AppendEntries messages should be sent to followers
+    c.clear()
+    c.machine.become_leader()
+    assert c.machine.state == 'LEADER'
+    assert len(c.messages) == 4
+    assert { m.dest for m in c.messages } == { 1, 2, 3, 4}
+    assert all(m.entries == [] for m in c.messages) 
+
+    # Figure 7. a-f.  This tries to test what happens to each follower
+    c.clear()
+    scenarios = {
+        'a': [1, 1, 1, 4, 4, 5, 5, 6, 6],
+        'b': [1, 1, 1, 4],
+        'c': [1, 1, 1, 4, 4, 5, 5, 6, 6, 6, 6],
+        'd': [1, 1, 1, 4, 4, 5, 5, 6, 6, 6, 7, 7],
+        'e': [1, 1, 1, 4, 4, 4, 4, 4],
+        'f': [1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3]
+    }
+    scenarios = { k: [ Entry(t, 0) for t in v ] for k, v in scenarios.items() }
+    
+    def run_scenario(control, name, entries=[]):
+        control.clear()
+        control.machine.state = "FOLLOWER"
+        control.machine.current_term = 7
+        control.machine.commit_index = 0
+        control.machine.log.append_entries(-1,-1, scenarios[name])
+        msg = AppendEntries(1, 0, 8, 9, 6, entries, 9)
+        control.machine.handle_message(msg)
+
+    run_scenario(c, 'a')
+    assert not c.messages[0].success                # Log is too short (missing an entry)
+    assert c.machine.log.entries == scenarios['a']  # Log unchanged
+
+    run_scenario(c, 'b')
+    assert not c.messages[0].success                # Log too short
+    assert c.machine.log.entries == scenarios['b']
+
+    run_scenario(c, 'c')
+    assert c.messages[0].success        # Log has all committed entries
+    assert c.machine.log.entries == scenarios['c']
+    assert c.machine.commit_index == 9   # Should reflect the leader
+
+    run_scenario(c, 'c', [Entry(8, 0)])
+    assert c.messages[0].success
+    assert len(c.machine.log) == 11, len(c.machine.log)     # Log should be truncated to leader length
+    assert c.machine.log[10] == Entry(8, 0)
+    assert c.machine.commit_index == 9
+
+    run_scenario(c, 'd')
+    assert c.messages[0].success
+    assert c.machine.log.entries == scenarios['d']
+    
+    run_scenario(c, 'd', [Entry(8, 0)])
+    assert c.messages[0].success
+    assert len(c.machine.log) == 11, len(c.machine.log)     # Log should be truncated to leader length
+    assert c.machine.log[10] == Entry(8, 0)
+
+    run_scenario(c, 'e')
+    assert not c.messages[0].success
+
+    run_scenario(c, 'f')
+    assert not c.messages[0].success
+
+    # ----------- Tests of consensus
+
+
+
+
+
+if __name__ == '__main__':
+    test_machine()
+
+
+
+

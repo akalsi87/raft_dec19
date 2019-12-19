@@ -8,6 +8,7 @@ import queue
 import logging
 import threading
 import time
+import random
 
 from .machine import RaftMachine
 from . import config
@@ -15,10 +16,14 @@ from . import config
 class RaftControl:
     def __init__(self, net):
         self.net = net
+        self.address = net.address
+        self.peers = [n for n in config.SERVERS if n != self.address]
         self.machine = RaftMachine(self)
         self._events = queue.Queue()
         self._debuglog = logging.getLogger(f'{self.net.address}.control')
 
+    def send_message(self, msg):
+        self.net.send(msg.dest, msg)
 
     def start(self):
         self._stopped = False
@@ -47,7 +52,18 @@ class RaftControl:
             self._events.put(('heartbeat',))
 
     def _election_timer(self):
-        pass
+        while True:
+            self._reset_election = False
+            timeout = config.ELECTION_TIMEOUT + (random.random() - 0.5)*config.ELECTION_TIMEOUT_SPREAD            
+            time.sleep(timeout)
+            if not self._reset_election:
+                self._events.put(('election_timeout',))
+            
+    def reset_election_timeout(self):
+        self._reset_election = True
+        
+    def client_add_entry(self, value):
+        self._events.put(('addentry', value))
 
     def _event_loop(self):
         while True:
@@ -66,6 +82,8 @@ class RaftControl:
                 self.machine.handle_election_timeout()
             elif evt == 'heartbeat':
                 self.machine.send_append_entries()
+            elif evt == 'addentry':
+                self.machine.client_add_entry(*args)   
             else:
                 raise RuntimeError("Unknown event")
 
