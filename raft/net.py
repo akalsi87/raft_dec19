@@ -9,6 +9,7 @@ import threading
 from socket import *
 import pickle
 import logging
+from collections import defaultdict
 
 from . import config
 from . import msgpass
@@ -17,8 +18,11 @@ class RaftNet:
     def __init__(self, address):
         self.address = address
         self._inbox = queue.Queue()
+        self._outbound = defaultdict(queue.Queue)
         self._socks = { }
         self._debuglog = logging.getLogger(f'{self.address}.net')
+        self._blocked = set()
+
 
     def start(self):
         self._debuglog.info("Network starting")
@@ -43,25 +47,44 @@ class RaftNet:
                 self._debuglog.debug("Received %r", msg)
                 self._inbox.put(msg)
 
-    def send(self, dest, msg):
-        if dest not in self._socks:
-            try:
-                sock = socket(AF_INET, SOCK_STREAM)
-                sock.connect(config.SERVERS[dest])
-            except IOError as e:
-                self._debuglog.info("Connection to %d failed", dest, exc_info=True)
-                return
-            self._socks[dest] = sock
+    def _sender(self, dest):
+        # Thread responsible for sending outbound messages to a given destination
+        while True:
+            msg = self._outbound[dest].get()
+            if dest not in self._socks:
+                try:
+                    sock = socket(AF_INET, SOCK_STREAM)
+                    sock.connect(config.SERVERS[dest])
+                except IOError as e:
+                    self._debuglog.info("Connection to %d failed", dest, exc_info=True)
+                    continue
+                self._socks[dest] = sock
         
-        try:
-            msgpass.send_message(self._socks[dest], pickle.dumps(msg))
-        except IOError as e:
-            self._debuglog.info("Send %r to %d failed", msg, dest, exc_info=True)
-            self._socks[dest].close()
-            del self._socks[dest]
+            try:
+                msgpass.send_message(self._socks[dest], pickle.dumps(msg))
+            except IOError as e:
+                self._debuglog.info("Send %r to %d failed", msg, dest, exc_info=True)
+                self._socks[dest].close()
+                del self._socks[dest]
+
+    def send(self, dest, msg):
+        if dest in self._blocked:
+            return
+        self._debuglog.debug("Sent %r", msg)
+        if dest not in self._outbound:
+            threading.Thread(target=self._sender, args=(dest,), daemon=True).start()
+    
+        self._outbound[dest].put(msg)
 
     def recv(self):
         return self._inbox.get()
 
 
-    
+    def block(self, *nodes):
+        self._blocked.update(nodes)
+
+    def unblock(self, *nodes):
+        for node in nodes:
+            self._blocked.discard(node)
+
+

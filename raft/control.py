@@ -9,21 +9,26 @@ import logging
 import threading
 import time
 import random
+from concurrent.futures import Future
 
 from .machine import RaftMachine
 from . import config
 
 class RaftControl:
-    def __init__(self, net):
+    def __init__(self, net, application_callback=lambda v: print(f'applying: {v}')):
         self.net = net
         self.address = net.address
         self.peers = [n for n in config.SERVERS if n != self.address]
+        self.application_callback = application_callback
         self.machine = RaftMachine(self)
         self._events = queue.Queue()
         self._debuglog = logging.getLogger(f'{self.net.address}.control')
 
     def send_message(self, msg):
         self.net.send(msg.dest, msg)
+
+    def apply_state_machine(self, value):
+        self.application_callback(value)
 
     def start(self):
         self._stopped = False
@@ -63,7 +68,9 @@ class RaftControl:
         self._reset_election = True
         
     def client_add_entry(self, value):
-        self._events.put(('addentry', value))
+        fut = Future()
+        self._events.put(('addentry', value, fut))
+        return fut.result()
 
     def _event_loop(self):
         while True:
@@ -83,7 +90,11 @@ class RaftControl:
             elif evt == 'heartbeat':
                 self.machine.send_append_entries()
             elif evt == 'addentry':
-                self.machine.client_add_entry(*args)   
+                if self.machine.state == 'LEADER':
+                    self.machine.client_add_entry(args[0])
+                    args[1].set_result('ok')   
+                else:
+                    args[1].set_result("error")
             else:
                 raise RuntimeError("Unknown event")
 

@@ -29,3 +29,14 @@ def show_logs():
     for n, c in enumerate(control):
         print(f'{n}:{c.machine.state:<10s}:{c.machine.log}')
 
+
+def block(server, *nodes):
+    control[server].net.block(*nodes)
+    for n in nodes:
+        control[n].net.block(server)
+
+def unblock(server, *nodes):
+    control[server].net.unblock(*nodes)
+    for n in nodes:
+        control[n].net.unblock(server)
+

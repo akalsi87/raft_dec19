@@ -4,6 +4,7 @@
 
 from typing import NamedTuple
 from .raftlog import RaftLog, Entry
+from . import config
 
 # RPC Messages
 class AppendEntries(NamedTuple):
@@ -50,7 +51,7 @@ class RaftMachine:
         self.last_applied = -1       # Highest log entry applied to the state machine
 
         # Volatile state on leaders
-        self.next_index = { }        # Index of next log entry that gets sent
+        self.next_index = { }        # Index of next log entry that gets sent to each follower
         self.match_index = { }       # Index of highest log entry known to be replicated
 
         self.become_follower()
@@ -63,6 +64,12 @@ class RaftMachine:
             self.log[-1].term if self.log else -1,
             [ Entry(self.current_term, value) ]
             )
+
+    def apply_state_machine(self):
+        # Apply committed entries to the client "state machine"
+        while self.last_applied < self.commit_index:
+            self.control.apply_state_machine(self.log[self.last_applied+1].value)
+            self.last_applied += 1
 
     def become_follower(self):
         self.state = "FOLLOWER"
@@ -129,7 +136,7 @@ class RaftMachine:
         # Call an election
         if self.state == 'LEADER':
             return 
-            
+
         self.become_candidate()
 
     def send_append_entries_one(self, n):
@@ -144,7 +151,7 @@ class RaftMachine:
                     self.current_term,
                     prev_log_index,
                     prev_log_term,
-                    self.log[self.next_index[n]:],
+                    self.log[self.next_index[n]:self.next_index[n]+config.MAXENTRIES],
                     self.commit_index
                 )
             )
@@ -173,12 +180,13 @@ class RaftMachine:
                 msg.source,
                 self.current_term,
                 success,
-                msg.prev_log_index + len(msg.entries) if success else -1
+                (msg.prev_log_index + len(msg.entries)) if success else -1
                 )
         )
         if success and msg.leader_commit > self.commit_index:
             self.commit_index = min(msg.leader_commit, len(self.log) -1)
             # Must apply to client state machine (possibly)
+            self.apply_state_machine()
             
     def handle_AppendEntriesResponse(self, msg):
         if self.state != 'LEADER':
@@ -192,11 +200,15 @@ class RaftMachine:
             committed = sorted(self.match_index.values())[len(self.match_index)//2]   # The "median"
             if committed > self.commit_index and self.log[committed].term == self.current_term:
                 self.commit_index = committed
+                self.apply_state_machine()
+
             # Might need to apply state machine
 
         else:
             # It failed! Must retry by backing the log index down by one
-            self.next_index[msg.source] -= 1
+            # assert self.next_index[msg.source] != -1, msg
+            if self.next_index[msg.source] >= -1:
+                self.next_index[msg.source] -= 1
             self.send_append_entries_one(msg.source)
 
     def handle_RequestVote(self, msg):
@@ -244,6 +256,9 @@ class MockController:
 
     def send_message(self, msg):
         self.messages.append(msg)
+
+    def apply_state_machine(self, value):
+        pass
 
 def test_machine():
     c = MockController(0, [1,2,3,4])
